@@ -8,165 +8,289 @@ import plotly.express as px
 import pandas as pd
 
 class BlackScholesModel:
-    """
-    Black-Scholes model for pricing European options and computing Greeks up to third order.
-    
-    Attributes:
-        S (float): Spot price of the underlying asset.
-        K (float): Strike price of the option.
-        T (float): Time to maturity in years.
-        r (float): Risk-free interest rate.
-        sigma (float): Volatility of the underlying asset.
-        option_type (str): 'call' or 'put' to specify the option type.
-    
-    Methods:
-        price(): Computes the option price.
-        delta(): Computes the first-order sensitivity to spot price.
-        gamma(): Computes the second-order sensitivity to spot price.
-        vega(): Computes the sensitivity to volatility.
-        theta(): Computes the sensitivity to time decay.
-        rho(): Computes the sensitivity to interest rate changes.
-        charm(): Computes the rate of change of delta over time.
-        speed(): Computes the rate of change of gamma with respect to spot price.
-        zomma(): Computes the rate of change of gamma with respect to volatility.
-        color(): Computes the rate of change of gamma over time.
-        ultima(): Computes the rate of change of vomma with respect to volatility.
-        vomma(): Computes the rate of change of vega with respect to volatility.
-        vanna(): Computes the sensitivity of delta to volatility (or vega to spot price).
-        dual_delta(): Computes the sensitivity to changes in strike price.
-        dual_gamma(): Computes the second-order sensitivity to strike price.
-        compute_greek_curve(): Compute a Greek value across a range of parameter values.
-        plot_greek_curves(): Plot multiple Greek curves with various parameter shifts.
-    """
-    
-    def __init__(self, S: float, K: float, T: float, r: float, sigma: float, option_type: str = 'call'):
-        """Initialize the Black-Scholes model with option parameters."""
-        self.S = S  # Spot price
-        self.K = K  # Strike price
-        self.T = T  # Time to maturity (in years)
-        self.r = r  # Risk-free rate
-        self.sigma = sigma  # Volatility
-        self.option_type = option_type.lower()
+    def __init__(self, S: float, K: float, T: float, r: float, sigma: float, 
+                 q: float = 0.0, repo: float = 0.0, option_type: str = 'call', 
+                 position_type: str = "long"):
+        """
+        Enhanced Black-Scholes option pricing model with dividends and repo rates.
         
-        # Validate option type
+        Parameters:
+        -----------
+        S : float
+            Current stock price
+        K : float
+            Strike price
+        T : float
+            Time to maturity in years
+        r : float
+            Risk-free interest rate (decimal form, e.g., 0.05 for 5%)
+        sigma : float
+            Volatility (decimal form, e.g., 0.2 for 20%)
+        q : float, optional
+            Continuous dividend yield (decimal form, e.g., 0.02 for 2%)
+        repo : float, optional
+            Repo rate (repurchase agreement rate for short-selling costs)
+        option_type : str, optional
+            Type of option ('call' or 'put')
+        position_type : str, optional
+            Position type ('long' or 'short')
+        """
+        self.S = S
+        self.K = K
+        self.T = T
+        self.r = r
+        self.sigma = sigma
+        self.q = q  # Dividend yield
+        self.repo = repo  # Repo rate
+        self.option_type = option_type.lower()
+        self.position_type = position_type.lower()
+        
+        # Cost of carry (adjusted for dividends and repo rate)
+        self.b = self.r - self.q - self.repo
+        
         if self.option_type not in ['call', 'put']:
             raise ValueError("Invalid option type. Use 'call' or 'put'.")
         
-        # Pre-compute d1 and d2 to avoid redundant calculations
+        if self.position_type not in ['long', 'short']:
+            raise ValueError("Invalid position type. Use 'long' or 'short'.")
+        
+        self.position_multiplier = 1 if self.position_type == "long" else -1
         self._update_d_values()
     
     def _update_d_values(self):
-        """Update d1 and d2 values based on current parameters."""
-        self.d1 = (np.log(self.S / self.K) + (self.r + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
+        """Calculate d1 and d2 parameters for the Black-Scholes formula."""
+        self.d1 = (np.log(self.S / self.K) + (self.b + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
         self.d2 = self.d1 - self.sigma * np.sqrt(self.T)
     
+    def param_d1(self) -> float:
+        return self.d1
+    
+    def param_d2(self) -> float:
+        return self.d1 - self.sigma * np.sqrt(self.T)
+    
+    def param_nd1(self) -> float:
+        return si.norm.cdf(self.d1)
+    
+    def param_nd2(self) -> float:
+        return si.norm.cdf(self.d2)
+    
     def payoff(self) -> float:
-        """Calculate the option payoff."""
-        if self.option_type == 'call':
-            return max(self.S - self.K, 0)
-        else:  # put option
-            return max(self.K - self.S, 0)
+        """Calculate the option payoff at expiration."""
+        payoff = max(self.S - self.K, 0) if self.option_type == 'call' else max(self.K - self.S, 0)
+        return self.position_multiplier * payoff
     
     def price(self) -> float:
-        """Calculate the option price."""
+        """Calculate the Black-Scholes option price."""
         if self.option_type == 'call':
-            return self.S * si.norm.cdf(self.d1) - self.K * np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
-        else:  # put option
-            return self.K * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2) - self.S * si.norm.cdf(-self.d1)
+            price = self.S * np.exp(-self.q * self.T) * si.norm.cdf(self.d1) - self.K * np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
+        else:
+            price = self.K * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2) - self.S * np.exp(-self.q * self.T) * si.norm.cdf(-self.d1)
+        return self.position_multiplier * price
     
     def delta(self) -> float:
-        """Calculate the option delta (first derivative with respect to spot price)."""
+        """
+        First derivative of option price with respect to the underlying asset price.
+        Measures the rate of change of option price with respect to changes in the underlying asset price.
+        """
         if self.option_type == 'call':
-            return si.norm.cdf(self.d1)
-        else:  # put option
-            return si.norm.cdf(self.d1) - 1
+            delta = np.exp(-self.q * self.T) * si.norm.cdf(self.d1)
+        else:
+            delta = np.exp(-self.q * self.T) * (si.norm.cdf(self.d1) - 1)
+        return self.position_multiplier * delta
     
     def gamma(self) -> float:
-        """Calculate the option gamma (second derivative with respect to spot price)."""
-        return si.norm.pdf(self.d1) / (self.S * self.sigma * np.sqrt(self.T))
+        """
+        Second derivative of option price with respect to the underlying asset price.
+        Measures the rate of change of delta with respect to changes in the underlying asset price.
+        """
+        return self.position_multiplier * (np.exp(-self.q * self.T) * si.norm.pdf(self.d1) / (self.S * self.sigma * np.sqrt(self.T)))
     
     def vega(self) -> float:
-        """Calculate the option vega (sensitivity to volatility)."""
-        return self.S * si.norm.pdf(self.d1) * np.sqrt(self.T) / 100  # Scaled by 100 for better readability
+        """
+        First derivative of option price with respect to volatility.
+        Measures the rate of change of option price with respect to changes in implied volatility.
+        Expressed in terms of a 1% change in volatility.
+        """
+        return self.position_multiplier * (self.S * np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * np.sqrt(self.T) / 100)
     
     def theta(self) -> float:
-        """Calculate the option theta (sensitivity to time decay)."""
-        term1 = -(self.S * si.norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
-        
+        """
+        First derivative of option price with respect to time to maturity.
+        Measures the rate of change of option price with respect to the passage of time.
+        Expressed in terms of a 1-day change.
+        """
         if self.option_type == 'call':
-            term2 = -self.r * self.K * np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
-        else:  # put option
-            term2 = self.r * self.K * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2)
-            
-        return (term1 + term2) / 365  # Daily theta (scaled to trading days)
+            term1 = -(self.S * np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+            term2 = -self.b * self.S * np.exp(-self.q * self.T) * si.norm.cdf(self.d1)
+            term3 = self.r * self.K * np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
+            theta = term1 + term2 - term3
+        else:
+            term1 = -(self.S * np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+            term2 = self.b * self.S * np.exp(-self.q * self.T) * si.norm.cdf(-self.d1)
+            term3 = self.r * self.K * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2)
+            theta = term1 + term2 - term3
+        return self.position_multiplier * (theta / 365)
     
     def rho(self) -> float:
-        """Calculate the option rho (sensitivity to interest rate changes)."""
+        """
+        First derivative of option price with respect to risk-free interest rate.
+        Measures the rate of change of option price with respect to changes in the risk-free rate.
+        Expressed in terms of a 1% change in the interest rate.
+        """
         if self.option_type == 'call':
-            return self.K * self.T * np.exp(-self.r * self.T) * si.norm.cdf(self.d2) / 100  # Scaled by 100
-        else:  # put option
-            return -self.K * self.T * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2) / 100  # Scaled by 100
+            rho = self.K * self.T * np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
+        else:
+            rho = -self.K * self.T * np.exp(-self.r * self.T) * si.norm.cdf(-self.d2)
+        return self.position_multiplier * (rho / 100)
     
     def charm(self) -> float:
-        """Calculate the option charm (rate of change of delta over time)."""
-        return -si.norm.pdf(self.d1) * (2 * (self.r - self.sigma**2 / 2) * self.T - self.d2 * self.sigma * np.sqrt(self.T)) / (2 * self.S * self.sigma * self.T * np.sqrt(self.T)) / 365  # Daily charm
+        """
+        Second cross-derivative of option price with respect to asset price and time.
+        Measures the rate of change of delta with respect to the passage of time.
+        Also known as delta decay or delta bleed.
+        """
+        charm = np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * \
+               (-self.d2 / (2 * self.T) - (self.b - self.q) / (self.sigma * np.sqrt(self.T)))
+        
+        if self.option_type == 'put':
+            charm = -charm
+            
+        return self.position_multiplier * (charm / 365)
     
     def speed(self) -> float:
-        """Calculate the option speed (rate of change of gamma with respect to spot price)."""
-        return -self.gamma() / self.S * (self.d1 / (self.sigma * np.sqrt(self.T)) + 1)
+        """
+        Third derivative of option price with respect to the underlying asset price.
+        Measures the rate of change of gamma with respect to changes in the underlying asset price.
+        """
+        return self.position_multiplier * (-np.exp(-self.q * self.T) * si.norm.pdf(self.d1) / 
+                                          (self.S**2 * self.sigma * np.sqrt(self.T)) * 
+                                          (self.d1 / (self.sigma * np.sqrt(self.T)) + 1))
     
     def zomma(self) -> float:
-        """Calculate the option zomma (rate of change of gamma with respect to volatility)."""
-        return self.gamma() * (self.d1 * self.d2 - 1) / self.sigma
+        """
+        Third cross-derivative of option price with respect to asset price (twice) and volatility.
+        Measures the rate of change of gamma with respect to changes in volatility.
+        """
+        return self.position_multiplier * (self.gamma() * ((self.d1 * self.d2 - 1) / self.sigma))
     
     def color(self) -> float:
-        """Calculate the option color (rate of change of gamma over time)."""
-        return (-si.norm.pdf(self.d1) / (2 * self.S * self.T * np.sqrt(self.T)) * (2 * self.r * self.T + 1 + self.d1 * self.d2)) / 365  # Daily color
+        """
+        Third cross-derivative of option price with respect to asset price (twice) and time.
+        Measures the rate of change of gamma with respect to the passage of time.
+        Also known as gamma decay or gamma bleed.
+        """
+        term1 = -np.exp(-self.q * self.T) * si.norm.pdf(self.d1) / (2 * self.S * self.T * self.sigma * np.sqrt(self.T))
+        term2 = 2 * (self.b + self.q) + (2 * self.b + 1) * self.d1 / (self.sigma * np.sqrt(self.T)) + self.d1 * self.d2 / self.T
+        return self.position_multiplier * ((term1 * term2) / 365)
     
     def ultima(self) -> float:
-        """Calculate the option ultima (rate of change of vomma with respect to volatility)."""
-        return -self.vomma() * (self.d1 * self.d2 + 1) / self.sigma
+        """
+        Third derivative of option price with respect to volatility.
+        Measures the rate of change of vomma with respect to changes in volatility.
+        """
+        return self.position_multiplier * (self.vomma() * ((self.d1 * self.d2 - 3) / self.sigma - (self.d1 * self.d2) / self.sigma))
     
     def vomma(self) -> float:
-        """Calculate the option vomma (rate of change of vega with respect to volatility)."""
-        return self.vega() * 100 * (self.d1 * self.d2)  # Rescaled because vega is already scaled
+        """
+        Second derivative of option price with respect to volatility.
+        Measures the rate of change of vega with respect to changes in volatility.
+        Also known as volga or vega convexity.
+        """
+        return self.position_multiplier * (self.vega() * 100 * (self.d1 * self.d2 / self.sigma))
     
     def vanna(self) -> float:
         """
-        Calculate the option vanna (cross partial derivative of delta with respect to volatility, 
-        or equivalently, the partial derivative of vega with respect to spot price).
-        
-        Vanna measures how the delta of an option changes with respect to a change in volatility,
-        or equivalently, how vega changes with respect to a change in the underlying price.
-        
-        Returns:
-            float: The vanna value.
+        Second cross-derivative of option price with respect to asset price and volatility.
+        Measures the rate of change of delta with respect to changes in volatility,
+        or the rate of change of vega with respect to changes in the underlying asset price.
         """
-        # Vanna is the same for both call and put options
-        return -si.norm.pdf(self.d1) * self.d2 / self.sigma
+        return self.position_multiplier * (-np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * self.d2 / self.sigma)
     
     def dual_delta(self) -> float:
-        """Calculate the option dual delta (sensitivity to changes in strike price)."""
+        """
+        First derivative of option price with respect to strike price.
+        """
         if self.option_type == 'call':
-            return -np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
-        else:  # put option
-            return np.exp(-self.r * self.T) * si.norm.cdf(-self.d2)
+            dual_delta = -np.exp(-self.r * self.T) * si.norm.cdf(self.d2)
+        else:
+            dual_delta = np.exp(-self.r * self.T) * si.norm.cdf(-self.d2)
+        return self.position_multiplier * dual_delta
     
     def dual_gamma(self) -> float:
-        """Calculate the option dual gamma (second-order sensitivity to strike price)."""
-        return np.exp(-self.r * self.T) * si.norm.pdf(self.d2) / (self.K * self.sigma * np.sqrt(self.T))
+        """
+        Second derivative of option price with respect to strike price.
+        """
+        return self.position_multiplier * (np.exp(-self.r * self.T) * si.norm.pdf(self.d2) / (self.K * self.sigma * np.sqrt(self.T)))
     
-    def get_params(self) -> Dict[str, float]:
-        """Get all model parameters as a dictionary."""
-        return {
-            'S': self.S,
-            'K': self.K,
-            'T': self.T,
-            'r': self.r,
-            'sigma': self.sigma
-        }
+    def elasticity(self) -> float:
+        """
+        Percentage change in option price for a percentage change in the underlying price.
+        Also known as lambda or leverage.
+        """
+        return self.delta() * self.S / self.price()
     
-
+    def epsilon(self) -> float:
+        """
+        First derivative of option price with respect to dividend yield.
+        Measures the rate of change of option price with respect to changes in the dividend yield.
+        Also known as psi.
+        """
+        if self.option_type == 'call':
+            epsilon = -self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(self.d1)
+        else:
+            epsilon = self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(-self.d1)
+        return self.position_multiplier * epsilon
+    
+    def repo_sensitivity(self) -> float:
+        """
+        First derivative of option price with respect to repo rate.
+        Measures the rate of change of option price with respect to changes in the repo rate.
+        """
+        # Similar structure to epsilon but with opposite sign since repo rate affects
+        # the cost of carry in the opposite direction of dividends
+        if self.option_type == 'call':
+            repo_sens = -self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(self.d1)
+        else:
+            repo_sens = self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(-self.d1)
+        return -self.position_multiplier * repo_sens  # Negative because higher repo rate decreases option value
+    
+    def carry_sensitivity(self) -> float:
+        """
+        First derivative of option price with respect to cost of carry.
+        Measures the rate of change of option price with respect to changes in the overall cost of carry.
+        """
+        if self.option_type == 'call':
+            carry_sens = self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(self.d1)
+        else:
+            carry_sens = -self.S * self.T * np.exp(-self.q * self.T) * si.norm.cdf(-self.d1)
+        return self.position_multiplier * carry_sens
+    
+    def carry_rho(self) -> float:
+        """
+        Sensitivity of option price to changes in the interest rate component of carry.
+        This isolates the effect of interest rate changes on the cost of carry,
+        separate from their direct effect on the discount factor.
+        """
+        return self.carry_sensitivity()
+    
+    def veta(self) -> float:
+        """
+        Second cross-derivative of option price with respect to volatility and time.
+        Measures the rate of change of vega with respect to the passage of time.
+        Also known as vega decay, vega bleed, or DvegaDtime.
+        """
+        term1 = -self.S * np.exp(-self.q * self.T) * si.norm.pdf(self.d1) * np.sqrt(self.T)
+        term2 = self.q + ((self.b + self.q) * self.d1) / (self.sigma * np.sqrt(self.T)) - ((1 + self.d1 * self.d2) / (2 * self.T))
+        return self.position_multiplier * ((term1 * term2) / (100 * 365))
+    
+    def vera(self) -> float:
+        """
+        Second cross-derivative of option price with respect to volatility and interest rate.
+        Measures the rate of change of rho with respect to changes in volatility,
+        or the rate of change of vega with respect to changes in the interest rate.
+        """
+        return self.position_multiplier * (self.K * self.T * np.exp(-self.r * self.T) * si.norm.pdf(self.d2) * self.d1 / (self.sigma * 100 * 100))
+    
 
 class BlackScholesVisualizer:
     """
@@ -286,7 +410,8 @@ class BlackScholesVisualizer:
     
     def plot_greek_area_curve_custom(self, greek_name, greek_func, param_name, param_range, 
                                  strike_price=None, spot_price=None, time_to_maturity=None, 
-                                 interest_rate=None, volatility=None, title=None, xlabel=None, ylabel=None):
+                                 interest_rate=None, volatility=None, dividend=None, repo=None, 
+                                 title=None, xlabel=None, ylabel=None):
         """
         Plot a Greek value across a range of parameter values using an area chart and a line curve with optional vertical lines.
         """
@@ -332,7 +457,9 @@ class BlackScholesVisualizer:
             'spot_price': ('cyan', spot_price),
             'time_to_maturity': ('orange', time_to_maturity),
             'interest_rate': ('blue', interest_rate),
-            'volatility': ('purple', volatility)
+            'volatility': ('purple', volatility),
+            'dividend': ('red', dividend),
+            'repo': ('brown', repo)
         }
 
         # Add optional vertical lines
